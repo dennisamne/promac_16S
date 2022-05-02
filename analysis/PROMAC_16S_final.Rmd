@@ -629,5 +629,8 @@ result <- mantel(com_dist, env_dist, method = "spearman")
 
 result
 ```
+This report was generated using R environment packages:
 
-This R-session was generated with ...
+```{r Session info}
+sessionInfo()
+```
