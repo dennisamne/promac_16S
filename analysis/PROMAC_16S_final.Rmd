@@ -1,0 +1,633 @@
+---
+title: "PROMAC_16S_analysis"
+author: "Dennis Amnebrink"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+    html_document:
+        code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = F)
+```
+
+```{r libraries}
+library(tidyverse)
+library(vegan)
+library(RColorBrewer)
+library(pheatmap)
+library(Hmisc)
+library(grid)
+```
+
+```{r colours, message=FALSE, warning=FALSE}
+GEOM_COL_COLOURS = c(
+  RColorBrewer::brewer.pal(12, name = 'Paired')) # Setting colour scheme vector.
+```
+
+```{r file_loading}
+taxonomy <- read_tsv("../data/taxonomy.tsv") %>%
+  separate(Taxon, c("domain", "phylum", "class", "order","family","genus","species"), sep =";") %>%
+  replace_na(list(phylum = "Unknown", class = "Unknown", order = "Unknown", family = "Unknown", genus = "JUnknown", species = "Unknown")) %>%
+  rename("Feature_ID" = "Feature ID") 
+  
+#Removing prefix in taxnomy names
+taxonomy$domain <- gsub("D_[0-9]__","", taxonomy$domain)
+taxonomy$phylum <- gsub("D_[0-9]__","", taxonomy$phylum)
+taxonomy$class <- gsub("D_[0-9]__","", taxonomy$class)
+taxonomy$order <- gsub("D_[0-9]__","", taxonomy$order)
+taxonomy$family <- gsub("D_[0-9]__","", taxonomy$family)
+taxonomy$genus <- gsub("D_[0-9]__","", taxonomy$genus)
+taxonomy$species <- gsub("D_[0-9]__","", taxonomy$species)
+
+#Filtering out chloroplasts and mitochondria
+taxonomy <- taxonomy %>% 
+            filter(order != "Chloroplast" & family != "Mitochondria") %>%
+            mutate(ASV = paste0("ASV",row_number()))
+
+
+abs_abu <- read_tsv("../data/feature-table.tsv") %>%
+  gather(sample, abundance, 2:ncol(.)) %>% #Creating a long format instead of wide
+  rename("Feature_ID" = "OTU ID") %>% # Renaming
+  inner_join(taxonomy, by = "Feature_ID")  %>% #joining in taxonomic information
+  filter(order != "Chloroplast" & family != "Mitochondria") %>% 
+  select(Feature_ID, sample, abundance)
+
+#Days : 0, 3, 6, 10, 13, 17, 20, 24, 27
+sample_key <- read_tsv("../data/sample_key.tsv") %>%
+  separate(replicate, c("treatment", "replicate"), sep = -1) 
+  
+sample_key$treatment <- sub(2,"", sample_key$treatment)
+
+#Reading in the file and matching the names
+mu <- read_tsv("../data/mu.tsv") %>%
+  rename(timepoint = "Sampling", treatment = "Treatment", replicate = "Replicate") %>%
+  mutate(timepoint = str_replace(timepoint, "^","T"), 
+         tre_rep = paste(timepoint, treatment, replicate, sep = ""))
+
+#Respiration values and creating common variable to join in other df (tre_rep)
+Rm <- read_tsv("../data/Rm_values.tsv") %>%
+   mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) 
+```
+
+# Overarching PCA 
+```{r PCA}
+pca <- decostand(
+as.matrix(
+  abs_abu %>%
+  inner_join(sample_key, by = "sample") %>%
+  mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) %>%
+  #group_by(tre_rep) %>%
+  #mutate(relab = abundance/sum(abundance)) %>% #Relative abundance not used due to hellinger.
+  #ungroup() %>%
+  select(Feature_ID, tre_rep, abundance) %>%
+  spread(Feature_ID, abundance, fill = 0) %>%
+  column_to_rownames("tre_rep")
+), method = "hellinger"
+) %>%
+  vegan::rda()
+
+eigenvalues <- as.data.frame(pca$CA$eig) %>%
+    rownames_to_column("PC_axes") %>%
+    rename(eigenvalues = "pca$CA$eig") %>%
+    mutate(eigenvalues_variation_explained = (eigenvalues/sum(eigenvalues) * 100))
+
+#Shape legend
+shapes = c(0,1,2,3,4,5,6,7,8)
+
+#Running and plotting PCA
+as.data.frame(pca$CA$u) %>%
+  rownames_to_column("tre_rep") %>%
+  inner_join(sample_key %>% mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")), by = "tre_rep") %>%
+  mutate(day = case_when(
+                      timepoint == "T0" ~ "S",
+                      timepoint == "T1" ~ "3",
+                      timepoint == "T2" ~ "6",
+                      timepoint == "T3" ~ "10",
+                      timepoint == "T4" ~ "13",
+                      timepoint == "T5" ~ "17",
+                      timepoint == "T6" ~ "20",
+                      timepoint == "T7" ~ "24",
+                      timepoint == "T8" ~ "27",
+                      TRUE ~ ""
+  )) %>% 
+    mutate(day = fct_relevel(day,
+                             "S","3","6","10","13","17","20","24","27")
+           ) %>% 
+  ggplot(mapping = aes(x = PC1, y = PC2)) +
+  geom_point(aes(shape = day, colour = treatment)) +
+   xlab(paste("PC1", round(eigenvalues$eigenvalues_variation_explained[1], digits = 2),"%", sep = " ")) +
+    ylab(paste("PC2", round(eigenvalues$eigenvalues_variation_explained[2], digits = 2),"%", sep = " ")) +
+  coord_cartesian(xlim = c(-0.22, 0.25), ylim= c(-0.25, 0.22)) +
+  scale_colour_manual(values = c("blue","green3","red","yellow4")) +
+   scale_shape_manual("Day of experiment", values=shapes) +
+   theme_minimal() +
+     theme(panel.grid = element_blank()) 
+  
+ggsave("../results/hell_counts_PCA.pdf") 
+ggsave("../results/hell_counts_PCA.png")
+  
+```
+
+# Family level plot
+```{r}
+top12 <- abs_abu %>%
+  inner_join(sample_key, by = "sample") %>%
+  mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) %>%
+  group_by(tre_rep) %>%
+  mutate(relab = abundance/sum(abundance)) %>%
+  ungroup() %>% # 869376 rows
+  inner_join(taxonomy, by = "Feature_ID")  %>%# 869376 rows
+  group_by(family) %>%
+  summarise(sum_relab = sum(relab)) %>%
+  ungroup() %>%
+  arrange(desc(sum_relab)) %>%
+  slice(1:12) %>%
+  .$family
+
+# Removing the uncultured category, so that it ends up in the "other" category later
+top12 = top12[-10] 
+
+#Creating a separate dataframe for Timepoint zero to append, as it is only present in one treatment.
+T0 <- abs_abu %>%
+  inner_join(sample_key, by = "sample") %>%
+  mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) %>%
+  group_by(tre_rep) %>%
+  mutate(relab = abundance/sum(abundance)) %>%
+  ungroup() %>% # 869376 rows
+  group_by(timepoint, treatment, Feature_ID) %>%
+  summarise(relab = mean(relab)) %>%
+  ungroup() %>%
+  inner_join(taxonomy, by = "Feature_ID")  %>% # 869376 rows
+  #mutate(new_phylum = ifelse(grepl("Proteobacteria", phylum), paste0(class, sep = ""), paste0(phylum))) %>%
+  mutate(Group = ifelse(family %in% top12, paste0(family), "Other")) %>%
+  group_by(timepoint, treatment, Group) %>%
+  summarise(sum_relab = sum(relab)) %>%
+  ungroup() %>%
+  filter(timepoint == "T0")
+
+#All together
+abs_abu %>%
+  inner_join(sample_key, by = "sample") %>%
+  mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) %>%
+  group_by(tre_rep) %>%
+  mutate(relab = abundance/sum(abundance)) %>%
+  ungroup() %>% # 869376 rows
+  group_by(timepoint, treatment, Feature_ID) %>%
+  summarise(relab = mean(relab)) %>%
+  ungroup() %>%
+  inner_join(taxonomy, by = "Feature_ID")  %>% # 869376 rows
+  mutate(Group = ifelse(family %in% top12, paste0(family), "Other")) %>%
+  group_by(timepoint, treatment, Group) %>%
+  summarise(sum_relab = sum(relab)) %>%
+  ungroup() %>%
+  rbind(.,T0 %>% mutate(treatment = str_replace(treatment, "C","N"))) %>% #Adding timepoint0 to all other treaments
+  rbind(.,T0 %>% mutate(treatment = str_replace(treatment, "C","T"))) %>%
+  rbind(.,T0 %>% mutate(treatment = str_replace(treatment, "C","TN"))) %>% #407 rows
+  mutate(day = ifelse(grepl("T0",timepoint),"S",   #Mutating in the day variable and ordering the days as factors
+                ifelse(grepl("T1",timepoint),"3", 
+                ifelse(grepl("T2", timepoint),"6",
+                ifelse(grepl("T3",timepoint),"10",
+                ifelse(grepl("T4",timepoint),"13",
+                ifelse(grepl("T5",timepoint),"17",
+                ifelse(grepl("T6", timepoint),"20",
+                ifelse(grepl("T7", timepoint),"24","27"))))))))) %>%
+  mutate(day = factor(day, levels = c("S","3","6","10","13","17","20","24","27"))) %>%
+  ggplot(mapping = aes(x = day, y =sum_relab, fill = fct_relevel(Group, "other", after = 12))) +
+  geom_col() +
+  facet_wrap(~ treatment) +
+  theme(axis.text.x = element_text(angle = 60), panel.background = element_blank()) +
+  scale_fill_manual('Family', values = GEOM_COL_COLOURS) +
+  ylab("Relative abundance") +
+  xlab("Day of experiment") 
+ggsave("../results/family_treatment_overview.pdf")
+```
+
+# PERMANOVA
+```{r}
+com_mat.hellinger <- decostand(as.matrix(
+    abs_abu %>%
+    inner_join(sample_key, by = "sample") %>%
+    mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) %>%
+    #group_by(tre_rep) %>%
+    #mutate(relab = abundance/sum(abundance)) %>%
+    #ungroup() %>%
+    filter(timepoint != "T0") %>%
+    group_by(Feature_ID) %>%
+    filter(abundance > 0) %>%
+    ungroup() %>%
+    semi_join(Rm %>% select(tre_rep, Rm_Rsb), by = "tre_rep") %>% #Reducing the data to only RM-included timepoints
+    select(Feature_ID,tre_rep, abundance) %>%
+    spread(Feature_ID, abundance, fill = 0) %>%
+    column_to_rownames("tre_rep")
+  ),
+  method = "hellinger")
+
+com_mat.hellinger.bray <- vegdist(com_mat.hellinger, method = "bray")
+
+explanatory_df <- abs_abu %>%
+  inner_join(sample_key, by = "sample") %>%
+  mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) %>%
+  group_by(tre_rep) %>%
+  mutate(relab = abundance/sum(abundance)) %>%
+  ungroup() %>%
+   filter(timepoint != "T0") %>%
+   group_by(Feature_ID) %>%
+    filter(relab > 0) %>%
+    ungroup() %>%
+  select(Feature_ID,tre_rep, relab, treatment) %>%
+  spread(Feature_ID, relab, fill = 0) %>%
+  select(tre_rep, treatment) %>%
+  inner_join(Rm %>% select(Rm_Rsb, tre_rep), by = "tre_rep") 
+
+com_mat.ado <-adonis(formula = com_mat.hellinger ~ treatment, data = explanatory_df, method = "bray")
+
+com_mat.ado
+
+#Function to do PERMANOVA for all treatments easy
+
+treat_ado <- function(i,j) {
+
+com_mat.hellinger <- decostand(as.matrix(
+    abs_abu %>%
+    inner_join(sample_key, by = "sample") %>%
+    mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) %>%
+    #group_by(tre_rep) %>%
+    #mutate(relab = abundance/sum(abundance)) %>%
+    #ungroup() %>%
+    filter(timepoint != "T0") %>%
+    filter(treatment %in% c(i,j)) %>%
+    group_by(Feature_ID) %>%
+    filter(abundance > 0) %>%
+    ungroup() %>%
+    semi_join(Rm %>% select(tre_rep, Rm_Rsb), by = "tre_rep") %>% #Reducing the data to only RM-included timepoints
+    select(Feature_ID,tre_rep, abundance) %>%
+    spread(Feature_ID, abundance, fill = 0) %>%
+    column_to_rownames("tre_rep")
+  ),
+  method = "hellinger")
+
+com_mat.hellinger.bray <- vegdist(com_mat.hellinger, method = "bray")
+
+explanatory_df <- abs_abu %>%
+  inner_join(sample_key, by = "sample") %>%
+  mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) %>%
+  group_by(tre_rep) %>%
+  mutate(relab = abundance/sum(abundance)) %>%
+  ungroup() %>%
+   filter(timepoint != "T0") %>%
+   group_by(Feature_ID) %>%
+    filter(relab > 0) %>%
+    ungroup() %>%
+  select(Feature_ID,tre_rep, relab, treatment) %>%
+  spread(Feature_ID, relab, fill = 0) %>%
+  select(tre_rep, treatment) %>%
+  inner_join(Rm %>% select(Rm_Rsb, tre_rep), by = "tre_rep") %>%
+  filter(treatment %in% c(i,j))
+
+adonis(formula = com_mat.hellinger ~ treatment, data = explanatory_df, method = "bray")
+}
+
+
+hmm <- treat_ado("N", "C") # R2 = 0.13, P = 0.001
+
+df <- hmm$aov.tab %>%
+  select(5,6) %>%
+  slice(1) %>%
+  mutate(treat1 = "N") %>%
+  mutate(treat2 = "C") 
+
+rownames(df) <- 1
+
+
+#Running the pairwise comparisons with two for-loops
+treat = as.character(c("C","N","T","TN"))
+for(i in treat){
+  for(j in treat){
+if (i == j) {next}
+if (j == i) {next}
+df <- rbind(df, treat_ado(i,j)$aov.tab %>%
+  select(5,6) %>%
+  slice(1)  %>%
+  mutate(treat1 = i, treat2 = j) 
+)
+  }
+}
+
+#Selecting non-redundant comparisons and adding p-value error-correction.
+df %>%
+  as.data.frame() %>%
+  mutate(comp = paste(treat1, treat2, sep = "_")) %>%
+  rename(p = 2) %>%
+  distinct(comp, R2, p) %>%
+  filter(comp %in% c("N_C","N_T","N_TN","C_T","C_TN","T_TN")) %>%
+  mutate(fdr = p.adjust(p, method = "fdr")) %>% 
+  write_tsv("../results/pairwise_adonis.tsv")
+```
+
+# Correlations with maintenance respiration and mu
+```{r, include=FALSE}
+#Ranking the top50 ASV's 
+rank_asv <- abs_abu %>%
+  inner_join(sample_key, by = "sample") %>%
+  mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) %>%
+  group_by(tre_rep) %>%
+  mutate(relab = abundance/sum(abundance)) %>%
+  ungroup() %>%
+  group_by(Feature_ID) %>%
+  summarise(relab = mean(relab)) %>%
+  ungroup() %>%
+  arrange(desc(relab)) 
+
+#Vector with top50 ASVs for filtering later
+top50_ASV <- abs_abu %>%
+  inner_join(sample_key, by = "sample") %>%
+  mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) %>%
+  group_by(tre_rep) %>%
+  mutate(relab = abundance/sum(abundance)) %>%
+  ungroup() %>% # 869376 rows
+  group_by(Feature_ID) %>%
+  summarise(relab = mean(relab)) %>%
+  ungroup() %>%
+  arrange(desc(relab)) %>%
+  slice(1:50) %>%
+  .$Feature_ID
+
+asv_relab <- abs_abu %>%
+  inner_join(sample_key, by = "sample") %>%
+  mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) %>%
+  group_by(tre_rep) %>%
+  mutate(relab = abundance/sum(abundance)) %>%
+  ungroup() %>% # 869376 rows
+  inner_join(taxonomy, by = "Feature_ID")  %>% # 869376 rows
+  group_by(Feature_ID,tre_rep) %>%
+  summarise(sum_relab = sum(relab)) %>%
+  ungroup() %>%
+  filter(Feature_ID %in% top50_ASV)
+
+my_mat <- asv_relab %>% 
+  spread(Feature_ID, sum_relab, fill = 0) %>%
+  inner_join(Rm %>% select(tre_rep, Rm_Rsb), by = "tre_rep") %>%
+  column_to_rownames("tre_rep") %>%
+  as.matrix()
+  
+res <- rcorr(my_mat)
+
+#Function to turn the data into long format, taken from: http://www.sthda.com/english/wiki/correlation-matrix-a-quick-start-guide-to-analyze-format-and-visualize-a-correlation-matrix-using-r-software
+
+flattenCorrMatrix <- function(cormat, pmat) {
+  ut <- upper.tri(cormat)
+  data.frame(
+    row = rownames(cormat)[row(cormat)[ut]],
+    column = rownames(cormat)[col(cormat)[ut]],
+    cor  =(cormat)[ut],
+    p = pmat[ut]
+    )
+}
+
+
+#Significant ASV's related to maintenance respiration, relatively high correlation with Rm_Rsb, overrepresented in certain treatments?
+Rm_ASV <- flattenCorrMatrix(res$r, res$P) %>%
+  mutate(fdr = p.adjust(p, method = "bonferroni")) %>%
+  filter(fdr <= 0.05) %>%
+  filter(column == "Rm_Rsb") %>%
+  select(row, cor) %>%
+  .$row
+
+Rm_ASV_values <- flattenCorrMatrix(res$r, res$P) %>%
+  mutate(bonferroni = p.adjust(p, method = "bonferroni")) %>%
+  filter(bonferroni <= 0.05) %>%
+  filter(column == "Rm_Rsb") %>%
+  select(row, cor, bonferroni) %>%
+  rename(Feature_ID = "row", Rm_cor = "cor", bonferroni_Rm = "bonferroni")
+
+#Creating the tahble with values
+flattenCorrMatrix(res$r, res$P) %>%
+  mutate(bonferroni = p.adjust(p, method = "bonferroni")) %>%
+  filter(column == "Rm_Rsb") %>%
+  select(row, cor, bonferroni, p) %>%
+  rename(Feature_ID = "row", Rm_cor = "cor", bonferroni_p = "bonferroni") %>%
+  arrange(desc(Rm_cor))  %>%
+  inner_join(taxonomy %>% select(Feature_ID, ASV), by = "Feature_ID") %>%
+  select(-Feature_ID) %>%
+  select(ASV, Rm_cor, bonferroni_p, p) %>%
+  write_tsv("../results/Rm_correlations.tsv")
+
+  my_mat <- asv_relab %>% 
+  spread(Feature_ID, sum_relab, fill = 0) %>%
+  inner_join(mu %>% select(tre_rep, mu), by = "tre_rep") %>%
+  column_to_rownames("tre_rep") %>%
+  as.matrix()
+
+res <- rcorr(my_mat)
+
+#Significant ASV's related to mu, two negative and one positive, not very high correlations though.10 ASV's with around .5 in correlation, positive and negative. negative overrepresented in C-treatment? Positive in TN?
+neg_corr_mu <- flattenCorrMatrix(res$r, res$P) %>%
+  mutate(bonferroni = p.adjust(p, method = "bonferroni")) %>%
+  filter(bonferroni <= 0.05) %>%
+  filter(column == "mu") %>%
+  filter(cor < 0) %>%
+  rename(Feature_ID = "row") %>%
+  inner_join(taxonomy %>% select(ASV, Feature_ID), by = "Feature_ID") %>%
+  .$ASV
+
+neg_corr_mu_values <- flattenCorrMatrix(res$r, res$P) %>%
+  mutate(fdr = p.adjust(p, method = "bonferroni")) %>%
+  filter(fdr <= 0.05) %>%
+  filter(column == "mu") %>%
+  filter(cor < 0) %>%
+  rename(Feature_ID = "row", mu_cor = "cor", mu_bonferroni = "fdr") %>%
+  select(-column, -p)
+
+corr_ASV <- taxonomy %>% filter(Feature_ID %in% Rm_ASV) %>% .$ASV
+
+#Interestingly enough the ones negatively correlated with mu is positively correlated with Rm_Rsb
+match(neg_corr_mu, corr_ASV)
+
+pos_corr_mu <- flattenCorrMatrix(res$r, res$P) %>%
+  mutate(fdr = p.adjust(p, method = "bonferroni")) %>%
+  filter(column == "mu") %>%
+  filter(fdr <= 0.05 & cor > 0) %>%
+  rename(Feature_ID = "row") %>%
+  inner_join(taxonomy %>% select(ASV, Feature_ID), by = "Feature_ID") %>%
+  .$ASV
+
+#Creating the mu correlation table
+flattenCorrMatrix(res$r, res$P) %>%
+  mutate(bonferroni = p.adjust(p, method = "bonferroni")) %>%
+  filter(column == "mu") %>%
+  select(row, cor, bonferroni, p) %>%
+  rename(Feature_ID = "row", mu_cor = "cor", bonferroni_p = "bonferroni") %>%
+  arrange(desc(mu_cor))  %>%
+  inner_join(taxonomy %>% select(Feature_ID, ASV), by = "Feature_ID") %>%
+  select(-Feature_ID) %>%
+  select(ASV, mu_cor, bonferroni_p, p) %>%
+  write_tsv("../results/mu_correlations.tsv")
+
+#
+#Joining the correlation numbers for negative corr with mu and positive Rm together in a table
+
+Rm_ASV_values %>%
+  inner_join(neg_corr_mu_values, by = "Feature_ID") %>%
+  inner_join(taxonomy %>% select(ASV, Feature_ID), by = "Feature_ID") %>%
+  select(-Feature_ID) %>%
+  rename(bonferroni_mu = "mu_bonferroni") %>%
+  select(ASV, Rm_cor, bonferroni_Rm, mu_cor, bonferroni_mu) %>%
+  write_tsv("../results/correlation_table.tsv")
+```
+
+# Pheatmap
+```{r}
+top50_mat <- abs_abu %>%
+  inner_join(sample_key, by = "sample") %>%
+  mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) %>%
+  group_by(tre_rep) %>%
+  mutate(relab = abundance/sum(abundance)) %>%
+  ungroup() %>% # 869376 rows
+  group_by(timepoint, treatment, Feature_ID) %>%
+  summarise(relab = mean(relab)) %>%
+  ungroup() %>%
+  filter(timepoint != "T0") %>%
+  semi_join(rank_asv %>% slice(1:50), by = "Feature_ID") %>%
+  mutate(titre = paste(treatment, timepoint, sep = "_")) %>%
+  select(Feature_ID, relab, titre) %>%
+  spread(titre, relab, fill = 0) %>%
+  inner_join(taxonomy %>% select(ASV, Feature_ID), by = "Feature_ID") %>%
+  select(-Feature_ID) %>%
+  column_to_rownames("ASV") %>%
+  as.matrix()
+
+#Pick out 12 most abundant families
+top12f <- abs_abu %>%
+  inner_join(sample_key, by = "sample") %>%
+  mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) %>%
+  group_by(tre_rep) %>%
+  mutate(relab = abundance/sum(abundance)) %>%
+  ungroup() %>% # 869376 rows
+  inner_join(taxonomy, by = "Feature_ID")  %>% # 869376 rows
+  #mutate(family = ifelse(family == "uncultured", paste(order, family, sep = "_"), paste0(family))) %>%
+  #mutate(family = ifelse(family == "Ambiguous_taxa",paste(order, family, sep = "_"), paste0(family))) %>%
+  #mutate(family = ifelse(family == "Unknown",paste(order, family, sep = "_"), paste0(family))) %>%
+  group_by(family) %>%
+  summarise(sum_relab = sum(relab)) %>%
+  ungroup() %>%
+  arrange(desc(sum_relab)) %>%
+  slice(1:12) %>%
+  .$family
+
+#Annotation dataframe for the pheatmap
+ann_df <- rank_asv %>%
+  slice(1:50) %>%
+  inner_join(taxonomy, by = "Feature_ID") %>% 
+  mutate(Group = ifelse(family %in% top12f, paste0(family), "Other")) %>%
+  select(-relab, -Feature_ID) %>% 
+  column_to_rownames("ASV") %>%
+  mutate(Group = ifelse(Group == "uncultured", paste0("Unknown"), paste0(Group))) %>%
+  select(Group) %>%
+  arrange(Group) 
+
+#Ordered by taxonomic group
+ord <- match(rownames(ann_df), rownames(top50_mat))
+
+unique(ann_df$Group)
+##Custom annotations
+#Group = c("Burkholderiaceae" = "#1F78B4", "Clade III" = "#B2DF8A", "Flavobacteriaceae" = "#33A02C", "Ilumatobacteraceae" = "#FB9A99", "Methylophilaceae" = "#E31A1C", "Mycobacteriaceae" = "#FDBF6F", "Nitrincolaceae" = "#FF7F00",  "Rhodobacteraceae" = "#CAB2D6", "Sporichthyaceae" = "#6A3D9A", "Other" = "#B15928" )
+
+
+groups <-  unique(ann_df$Group)
+
+
+#Pheatmap needs this type of format for assigning colours to groups if more than one, the vector matching here is used for me to quickly write it down myself in the next My_colour list below
+
+#my_colour = list(Group = c(groups[1] = GEOM_COL_COLOURS[1],
+                    #       groups[2] = GEOM_COL_COLOURS[2],
+                    #       groups[3] = GEOM_COL_COLOURS[3],
+                    #       groups[4] = GEOM_COL_COLOURS[4],
+                    #       groups[5] = GEOM_COL_COLOURS[5], 
+                    #       groups[6] = GEOM_COL_COLOURS[6],
+                    #       groups[7] = GEOM_COL_COLOURS[7],
+                     #      groups[8] = GEOM_COL_COLOURS[8],
+                     #      groups[9] = GEOM_COL_COLOURS[9],
+                      #     groups[10] = GEOM_COL_COLOURS[10],
+                      #     groups[11] = GEOM_COL_COLOURS[11],
+                      #     groups[12] = GEOM_COL_COLOURS[12])
+ # ,
+#  Treatment = c("C" = "blue", "N" = "green3", "T" = "red", "TN" = "yellow4")
+#)
+my_colour = list(Group = c("Ambiguous_taxa" = "#A6CEE3",
+                           "Burkholderiaceae" = "#1F78B4",
+                           "Clade III" = "#B2DF8A",
+                           "Flavobacteriaceae" = "#33A02C",
+                           "Ilumatobacteraceae" = "#FB9A99", 
+                           "Methylophilaceae" = "#E31A1C",
+                           "Mycobacteriaceae" = "#FDBF6F",
+                           "Nitrincolaceae" = "#FF7F00",
+                           "Other" = "#CAB2D6",
+                           "Rhodobacteraceae" = "#6A3D9A",
+                           "Sporichthyaceae" = "#FFFF99",
+                           "Unknown" = "#B15928")
+  ,
+  Treatment = c("C" = "blue", "N" = "green3", "T" = "red", "TN" = "yellow4")
+)
+
+#apply(top50_mat[ord,], 1, max) ## Among the top50 only one ASV does not reach to 1% in at least one sample, so almost all can be considered abundant It is also clear that the ASV's with significant correlation to maintenance respiration is abundance in the C-treatment.
+
+#Vector to pretty up the column labels
+row_vec <- c(paste("C",seq(1,8), sep = ""), paste("N",seq(1,8), sep = ""), paste("T",seq(1,8), sep = ""), paste("TN",seq(1,8), sep = ""))
+
+#MAKE TREATMENT VECTOR
+Treatment <- c("C","C","C","C","C","C","C","C","N","N","N","N","N","N","N","N","T","T","T","T","T","T","T","T","TN","TN","TN","TN","TN","TN","TN","TN")
+
+
+#Connecting the annotation column by adding rownames to match colnames in matrix
+ann_col <- data.frame(Treatment)
+rownames(ann_col) <- colnames(top50_mat)
+row_vec <- rep(c("3","6","10","13","17","20","24","27"), times = 4)
+
+#The pheatmap with added x-label
+pdf("../results/top50_updated.pdf")
+ #Alternative version
+ pheatmap(top50_mat, annotation_row = ann_df, annotation_col = ann_col, cluster_cols = F, cluster_rows = T, clustering_distance_rows = "correlation", gaps_col = c(8,16,24), annotation_color = my_colour, fontsize = 8, 
+          labels_row = case_when(
+            rownames(top50_mat) %in% corr_ASV ~ paste0(rownames(top50_mat),"*"),
+                           rownames(top50_mat) %in% pos_corr_mu ~ paste0(rownames(top50_mat),"#"),
+                           TRUE ~ rownames(top50_mat)
+            ), cellwidth = 7, cellheight = 7, fontsize_row = 8, fontsize_col = 6, annotation_names_row = F, width = 7, height = 7,treeheight_row = 15, labels_col = row_vec, angle_col = 90)
+grid.text("Day of experiment" , x= 0.355, y = 0.1, gp = gpar(fontsize = 12))
+grid.text("ASV" , x= 0.03, y = 0.50, gp = gpar(fontsize = 12), rot = 90)
+dev.off()
+
+```
+
+# Mantel test
+```{r}
+#Creating community mat
+mantel_mat <- abs_abu %>%
+  inner_join(sample_key, by = "sample") %>%
+  mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) %>%
+  group_by(tre_rep) %>%
+  mutate(relab = abundance/sum(abundance)) %>%
+  ungroup() %>% # 869376 rows
+  inner_join(taxonomy, by = "Feature_ID")  %>% # 869376 rows
+  group_by(Feature_ID,tre_rep) %>%
+  summarise(sum_relab = sum(relab)) %>%
+  ungroup() %>%
+  spread(Feature_ID, sum_relab, fill = 0) %>%
+  inner_join(mu %>% select(tre_rep, mu), by = "tre_rep") %>%
+  column_to_rownames("tre_rep") %>%
+  as.matrix()
+
+#Calculate bray-curtis distances on the community (exclude the mu from df)
+com_dist <- vegdist(mantel_mat[1:nrow(mantel_mat),1:9056], method = "bray")
+
+#Euclidean distance for env. vector
+env_dist <- vegdist(mantel_mat[1:nrow(mantel_mat),9057], method = "euclidean")
+
+#The test - it works and show a somewhat weak correlation between community and mu, but check other variables.
+
+result <- mantel(com_dist, env_dist, method = "spearman")
+
+result
+```
+
+This R-session was generated with ...
