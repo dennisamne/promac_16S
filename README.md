@@ -9,6 +9,7 @@ This repository contains the code, count and taxonomy files together with the me
 This analysis was run using R version 3.6.3. Through Rstudio (2021.09.1 Build 372) on mac OS X.
 
 Package versions that should be installed are:
+
 install.packages("tidyverse", version="1.3.1")
 
 install.packages("vegan", version="2.5.7")
