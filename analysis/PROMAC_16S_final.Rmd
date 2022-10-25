@@ -70,6 +70,54 @@ Rm <- read_tsv("../data/Rm_values.tsv") %>%
    mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) 
 ```
 
+```{r overview_table}
+overview_table <- abs_abu %>%
+  group_by(sample) %>%
+  mutate(relab = abundance/sum(abundance)) %>%
+  ungroup() %>% # 869376 rows
+  group_by(sample, Feature_ID) %>%
+  summarise(relab = sum(relab)) %>%
+  ungroup() %>%
+  inner_join(sample_key, by = "sample") %>%
+  inner_join(taxonomy, by = "Feature_ID") 
+  
+
+write_tsv(overview_table, "../results/overview_table.tsv")
+```
+
+#ASV-plots
+```{r ASV count-contribution}
+rank_asv <- abs_abu %>%
+  inner_join(sample_key, by = "sample") %>%
+  mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) %>%
+  group_by(tre_rep) %>%
+  mutate(relab = abundance/sum(abundance)) %>%
+  ungroup() %>%
+  group_by(Feature_ID) %>%
+  summarise(relab = mean(relab)) %>%
+  ungroup() %>%
+  arrange(desc(relab)) 
+
+asv_rank <- abs_abu %>%
+  group_by(Feature_ID) %>%
+  summarise(sum_counts = sum(abundance)) %>%
+  ungroup() %>%
+  mutate(relab = sum_counts/sum(sum_counts)) %>%
+  ungroup() %>%
+  arrange(desc(relab)) %>%
+  slice(1:100) %>%
+  mutate(cum_sum = cumsum(relab))
+
+#Cumulative relative abundance from the top 50 ASV's is 73%
+asv_rank[50,4]
+  
+tiff("../results/cumsum_fig.tiff", width = 80, height = 80, units = "mm", res = 300)
+plot(cumsum(sort(asv_rank$relab, decreasing = T)) , ylab = "accumulative mean relab", xlab = "ASV rank index")
+abline(v = c(50), lty = c(3), col = c("red"))
+abline(h = c(0.73), lty = c(3), col = c("red"))
+dev.off()
+```
+
 # Overarching PCA 
 ```{r PCA}
 pca <- decostand(
@@ -126,7 +174,7 @@ as.data.frame(pca$CA$u) %>%
   
 ggsave("../results/hell_counts_PCA.pdf") 
 ggsave("../results/hell_counts_PCA.png")
-  
+ggsave("../results/hell_counts_PCA.tiff", width = 18, height = 14, unit = "cm", dpi = 300, bg = "white")
 ```
 
 # Family level plot
@@ -211,7 +259,7 @@ T0 <- abs_abu %>%
   ylab("Relative abundance") +
   xlab("Day of experiment") 
  
- ggsave("../results/family_treatment_overview.pdf")
+ ggsave("../results/family_treatment_overview.tiff", width = 16, height = 16, units = "cm", dpi = 300)
 ```
 
 # PERMANOVA
@@ -620,7 +668,7 @@ make_bold_underline_names <- function(mat, rc_fun, rc_names, rc_names2) {
 }
 #ASV's of interest
 
-pdf("../results/top50_updated.pdf")
+tiff("../results/top50_updated.tiff", res = 300, height = 18 , width = 18, unit = "cm")
 pheatmap(
   top50_mat, annotation_row = ann_df, annotation_col = ann_col, cluster_cols = F, cluster_rows = T, clustering_distance_rows = "correlation", gaps_col = c(8,16,24), annotation_color = my_colour, fontsize = 8, labels_row = make_bold_underline_names(top50_mat, rownames, corr_ASV, pos_corr_mu),  cellwidth = 7, cellheight = 7, fontsize_row = 8, fontsize_col = 6, annotation_names_row = F, width = 7, height = 7,treeheight_row = 15, labels_col = row_vec, angle_col = 90)
 dev.off()
