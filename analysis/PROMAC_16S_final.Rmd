@@ -143,7 +143,15 @@ top12 <- abs_abu %>%
   ungroup() %>%
   arrange(desc(sum_relab)) %>%
   slice(1:12) %>%
-  .$family
+  pull(family)
+
+#Arranging the taxa not on abundance but on order-level for the known classes
+family_arranged <- taxonomy %>% 
+  filter(family %in% top12) %>% 
+  distinct(class, family) %>% 
+  filter(!family %in% c("Ambiguous_taxa","Unknown")) %>% 
+  arrange(class) %>%
+  pull(family)
 
 # Removing the uncultured category, so that it ends up in the "other" category later
 top12 = top12[-10] 
@@ -160,14 +168,15 @@ T0 <- abs_abu %>%
   ungroup() %>%
   inner_join(taxonomy, by = "Feature_ID")  %>% # 869376 rows
   #mutate(new_phylum = ifelse(grepl("Proteobacteria", phylum), paste0(class, sep = ""), paste0(phylum))) %>%
-  mutate(Group = ifelse(family %in% top12, paste0(family), "Other")) %>%
-  group_by(timepoint, treatment, Group) %>%
+  mutate(Group = ifelse(family %in% top12[-9], paste0(family), "Other")) %>%
+  mutate(Group1 = ifelse(family %in% top12[c(-6, -9)], paste0(class, "; ", family), paste0(Group))) %>%
+  group_by(timepoint, treatment, Group1) %>%
   summarise(sum_relab = sum(relab)) %>%
   ungroup() %>%
   filter(timepoint == "T0")
 
 #All together
-abs_abu %>%
+ abs_abu %>%
   inner_join(sample_key, by = "sample") %>%
   mutate(tre_rep = paste(timepoint, treatment, replicate, sep = "")) %>%
   group_by(tre_rep) %>%
@@ -177,8 +186,9 @@ abs_abu %>%
   summarise(relab = mean(relab)) %>%
   ungroup() %>%
   inner_join(taxonomy, by = "Feature_ID")  %>% # 869376 rows
-  mutate(Group = ifelse(family %in% top12, paste0(family), "Other")) %>%
-  group_by(timepoint, treatment, Group) %>%
+  mutate(Group = ifelse(family %in% top12[-9], paste0(family), "Other")) %>%
+  mutate(Group1 = ifelse(family %in% top12[c(-6,-9)], paste0(class, "; ", family), paste0(Group))) %>%
+  group_by(timepoint, treatment, Group1) %>%
   summarise(sum_relab = sum(relab)) %>%
   ungroup() %>%
   rbind(.,T0 %>% mutate(treatment = str_replace(treatment, "C","N"))) %>% #Adding timepoint0 to all other treaments
@@ -193,14 +203,15 @@ abs_abu %>%
                 ifelse(grepl("T6", timepoint),"20",
                 ifelse(grepl("T7", timepoint),"24","27"))))))))) %>%
   mutate(day = factor(day, levels = c("S","3","6","10","13","17","20","24","27"))) %>%
-  ggplot(mapping = aes(x = day, y =sum_relab, fill = fct_relevel(Group, "other", after = 12))) +
+  ggplot(mapping = aes(x = day, y =sum_relab, fill = Group1)) +
   geom_col() +
   facet_wrap(~ treatment) +
   theme(axis.text.x = element_text(angle = 60), panel.background = element_blank()) +
   scale_fill_manual('Family', values = GEOM_COL_COLOURS) +
   ylab("Relative abundance") +
   xlab("Day of experiment") 
-ggsave("../results/family_treatment_overview.pdf")
+ 
+ ggsave("../results/family_treatment_overview.pdf")
 ```
 
 # PERMANOVA
@@ -522,9 +533,12 @@ ann_df <- rank_asv %>%
   mutate(Group = ifelse(family %in% top12f, paste0(family), "Other")) %>%
   select(-relab, -Feature_ID) %>% 
   column_to_rownames("ASV") %>%
-  mutate(Group = ifelse(Group == "uncultured", paste0("Unknown"), paste0(Group))) %>%
-  select(Group) %>%
-  arrange(Group) 
+  mutate(Group = ifelse(Group == "uncultured", paste0("Other"), paste0(Group))) %>%
+  mutate(Group = ifelse(family %in% top12f[c(-9, -10)], paste0(family), "Other")) %>%
+  mutate(Group1 = ifelse(family %in% top12f[c(-6,-9, -10)], paste0(class, "; ", family),Group)) %>%
+  select(Group1) %>%
+  arrange(Group1) %>%
+  rename(Group = "Group1")
 
 #Ordered by taxonomic group
 ord <- match(rownames(ann_df), rownames(top50_mat))
@@ -554,19 +568,19 @@ groups <-  unique(ann_df$Group)
  # ,
 #  Treatment = c("C" = "blue", "N" = "green3", "T" = "red", "TN" = "yellow4")
 #)
-my_colour = list(Group = c("Ambiguous_taxa" = "#A6CEE3",
-                           "Burkholderiaceae" = "#1F78B4",
-                           "Clade III" = "#B2DF8A",
-                           "Flavobacteriaceae" = "#33A02C",
-                           "Ilumatobacteraceae" = "#FB9A99", 
-                           "Methylophilaceae" = "#E31A1C",
-                           "Mycobacteriaceae" = "#FDBF6F",
-                           "Nitrincolaceae" = "#FF7F00",
-                           "Other" = "#CAB2D6",
-                           "Rhodobacteraceae" = "#6A3D9A",
-                           "Sporichthyaceae" = "#FFFF99",
-                           "Unknown" = "#B15928")
-  ,
+my_colour = list(Group = c("Acidimicrobiia; Ilumatobacteraceae" = "#A6CEE3",
+                           "Actinobacteria; Mycobacteriaceae" = "#1F78B4",
+                           "Actinobacteria; Sporichthyaceae" = "#B2DF8A",
+                           "Alphaproteobacteria; Clade III" = "#33A02C",
+                           "Alphaproteobacteria; Rhodobacteraceae" = "#FB9A99", 
+                           "Bacteroidia; Flavobacteriaceae" = "#E31A1C",
+                           "Gammaproteobacteria; Burkholderiaceae" = "#FDBF6F",
+                           "Gammaproteobacteria; Methylophilaceae" = "#FF7F00",
+                           "Gammaproteobacteria; Nitrincolaceae" = "#CAB2D6",
+                           "Other" = "#6A3D9A",
+                           "Unknown" = "#FFFF99"),
+                           
+  
   Treatment = c("C" = "blue", "N" = "green3", "T" = "red", "TN" = "yellow4")
 )
 
@@ -578,25 +592,38 @@ row_vec <- c(paste("C",seq(1,8), sep = ""), paste("N",seq(1,8), sep = ""), paste
 #MAKE TREATMENT VECTOR
 Treatment <- c("C","C","C","C","C","C","C","C","N","N","N","N","N","N","N","N","T","T","T","T","T","T","T","T","TN","TN","TN","TN","TN","TN","TN","TN")
 
-
 #Connecting the annotation column by adding rownames to match colnames in matrix
 ann_col <- data.frame(Treatment)
 rownames(ann_col) <- colnames(top50_mat)
 row_vec <- rep(c("3","6","10","13","17","20","24","27"), times = 4)
 
-#The pheatmap with added x-label
-pdf("../results/top50_updated.pdf")
- #Alternative version
- pheatmap(top50_mat, annotation_row = ann_df, annotation_col = ann_col, cluster_cols = F, cluster_rows = T, clustering_distance_rows = "correlation", gaps_col = c(8,16,24), annotation_color = my_colour, fontsize = 8, 
-          labels_row = case_when(
-            rownames(top50_mat) %in% corr_ASV ~ paste0(rownames(top50_mat),"*"),
-                           rownames(top50_mat) %in% pos_corr_mu ~ paste0(rownames(top50_mat),"#"),
-                           TRUE ~ rownames(top50_mat)
-            ), cellwidth = 7, cellheight = 7, fontsize_row = 8, fontsize_col = 6, annotation_names_row = F, width = 7, height = 7,treeheight_row = 15, labels_col = row_vec, angle_col = 90)
-grid.text("Day of experiment" , x= 0.355, y = 0.1, gp = gpar(fontsize = 12))
-grid.text("ASV" , x= 0.03, y = 0.50, gp = gpar(fontsize = 12), rot = 90)
-dev.off()
+#Function to label rownames in bold and underlined
+make_bold_underline_names <- function(mat, rc_fun, rc_names, rc_names2) {
+  bold_names <- rc_fun(mat)
+  ids1 <- rc_names %>% match(rc_fun(mat))
+  ids1 %>%
+    walk(
+      function(i)
+        bold_names[i] <<-
+        bquote(bold(.(rc_fun(mat)[i]))) %>%
+        as.expression()
+    )
+  ids2 <- rc_names2 %>% match(rc_fun(mat))
+  ids2 %>%
+  walk(
+      function(i)
+        bold_names[i] <<-
+        bquote(underline(.(rc_fun(mat)[i]))) %>%
+        as.expression()
+    )
+  bold_names
+}
+#ASV's of interest
 
+pdf("../results/top50_updated.pdf")
+pheatmap(
+  top50_mat, annotation_row = ann_df, annotation_col = ann_col, cluster_cols = F, cluster_rows = T, clustering_distance_rows = "correlation", gaps_col = c(8,16,24), annotation_color = my_colour, fontsize = 8, labels_row = make_bold_underline_names(top50_mat, rownames, corr_ASV, pos_corr_mu),  cellwidth = 7, cellheight = 7, fontsize_row = 8, fontsize_col = 6, annotation_names_row = F, width = 7, height = 7,treeheight_row = 15, labels_col = row_vec, angle_col = 90)
+dev.off()
 ```
 
 # Mantel test
